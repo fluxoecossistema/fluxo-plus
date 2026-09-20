@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/currency_input_formatter.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/models/goal.dart';
 import '../../../shared/widgets/empty_state.dart';
@@ -29,10 +30,12 @@ class _GoalsScreenState extends State<GoalsScreen> {
   Future<void> _edit([Goal? goal]) async {
     final name = TextEditingController(text: goal?.name);
     final target = TextEditingController(
-      text: goal?.targetAmount.toStringAsFixed(2).replaceAll('.', ','),
+      text: goal == null
+          ? null
+          : CurrencyInputFormatter.format(goal.targetAmount),
     );
     final current = TextEditingController(
-      text: goal?.currentAmount.toStringAsFixed(2).replaceAll('.', ',') ?? '0',
+      text: CurrencyInputFormatter.format(goal?.currentAmount ?? 0),
     );
     DateTime? deadline = goal?.deadline;
     final key = GlobalKey<FormState>();
@@ -52,6 +55,8 @@ class _GoalsScreenState extends State<GoalsScreen> {
                     TextFormField(
                       controller: name,
                       autofocus: true,
+                      textCapitalization: TextCapitalization.words,
+                      textInputAction: TextInputAction.next,
                       decoration: const InputDecoration(labelText: 'Objetivo'),
                       validator: (value) =>
                           value == null || value.trim().isEmpty
@@ -61,10 +66,13 @@ class _GoalsScreenState extends State<GoalsScreen> {
                     const SizedBox(height: 12),
                     TextFormField(
                       controller: target,
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
-                      decoration:
-                          const InputDecoration(labelText: 'Valor alvo'),
+                      keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.next,
+                      inputFormatters: const [CurrencyInputFormatter()],
+                      decoration: const InputDecoration(
+                        labelText: 'Valor alvo',
+                        hintText: r'R$ 0,00',
+                      ),
                       validator: (value) {
                         final parsed = AppFormatters.parseCurrency(value ?? '');
                         return parsed == null || parsed <= 0
@@ -75,10 +83,13 @@ class _GoalsScreenState extends State<GoalsScreen> {
                     const SizedBox(height: 12),
                     TextFormField(
                       controller: current,
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
-                      decoration:
-                          const InputDecoration(labelText: 'Valor atual'),
+                      keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.done,
+                      inputFormatters: const [CurrencyInputFormatter()],
+                      decoration: const InputDecoration(
+                        labelText: 'Valor atual',
+                        hintText: r'R$ 0,00',
+                      ),
                       validator: (value) =>
                           AppFormatters.parseCurrency(value ?? '') == null
                               ? 'Informe um valor válido'
