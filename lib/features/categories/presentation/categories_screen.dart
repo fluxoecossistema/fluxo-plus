@@ -44,6 +44,8 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                 TextFormField(
                   controller: name,
                   autofocus: true,
+                  textCapitalization: TextCapitalization.words,
+                  textInputAction: TextInputAction.done,
                   decoration: const InputDecoration(labelText: 'Nome'),
                   validator: (value) => value == null || value.trim().isEmpty
                       ? 'Informe o nome'
