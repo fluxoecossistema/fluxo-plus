@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/currency_input_formatter.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/models/account.dart';
 import '../../../shared/widgets/empty_state.dart';
@@ -28,61 +29,96 @@ class _AccountsScreenState extends State<AccountsScreen> {
 
   Future<void> _edit([Account? account]) async {
     final name = TextEditingController(text: account?.name);
+    final initialBalance = account?.initialBalance;
     final balance = TextEditingController(
-      text: account?.initialBalance.toStringAsFixed(2).replaceAll('.', ','),
+      text: initialBalance == null
+          ? null
+          : CurrencyInputFormatter.format(initialBalance),
     );
+    // The field holds the magnitude only; the sign is kept apart and applied
+    // when the value is read.
+    var negative = initialBalance != null && initialBalance < 0;
     final key = GlobalKey<FormState>();
+    void submit(BuildContext context) {
+      if (key.currentState!.validate()) Navigator.pop(context, true);
+    }
+
     final saved = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(account == null ? 'Nova conta' : 'Editar conta'),
-        content: Form(
-          key: key,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: name,
-                autofocus: true,
-                decoration: const InputDecoration(labelText: 'Nome'),
-                validator: (value) => value == null || value.trim().isEmpty
-                    ? 'Informe o nome'
-                    : null,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: balance,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(labelText: 'Saldo inicial'),
-                validator: (value) =>
-                    AppFormatters.parseCurrency(value ?? '') == null
-                        ? 'Informe um valor válido'
-                        : null,
-              ),
-            ],
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(account == null ? 'Nova conta' : 'Editar conta'),
+          content: Form(
+            key: key,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  autofocus: true,
+                  textCapitalization: TextCapitalization.words,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(labelText: 'Nome'),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Informe o nome'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: balance,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.done,
+                  inputFormatters: const [CurrencyInputFormatter()],
+                  decoration: InputDecoration(
+                    labelText: 'Saldo inicial',
+                    hintText: r'R$ 0,00',
+                    prefixText: negative ? '- ' : null,
+                    prefixStyle: TextStyle(color: context.colors.expense),
+                    suffixIcon: IconButton(
+                      tooltip: negative
+                          ? 'Saldo negativo (toque para positivo)'
+                          : 'Saldo positivo (toque para negativo)',
+                      onPressed: () =>
+                          setDialogState(() => negative = !negative),
+                      icon: Icon(
+                        negative
+                            ? Icons.remove_circle_outline
+                            : Icons.add_circle_outline,
+                        color: negative
+                            ? context.colors.expense
+                            : context.colors.income,
+                      ),
+                    ),
+                  ),
+                  validator: (value) =>
+                      AppFormatters.parseCurrency(value ?? '') == null
+                          ? 'Informe um valor válido'
+                          : null,
+                  onFieldSubmitted: (_) => submit(context),
+                ),
+              ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => submit(context),
+              child: const Text('Salvar'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancelar'),
-          ),
-          FilledButton(
-            onPressed: () {
-              if (key.currentState!.validate()) Navigator.pop(context, true);
-            },
-            child: const Text('Salvar'),
-          ),
-        ],
       ),
     );
     if (saved != true) return;
+    final magnitude = AppFormatters.parseCurrency(balance.text)!;
     await widget.repository.save(
       Account(
         id: account?.id,
         name: name.text.trim(),
-        initialBalance: AppFormatters.parseCurrency(balance.text)!,
+        initialBalance: negative && magnitude != 0 ? -magnitude : magnitude,
         createdAt: account?.createdAt ?? DateTime.now(),
       ),
     );
