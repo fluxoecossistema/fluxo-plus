@@ -13,6 +13,11 @@ enum SyncConflictChoice { useCloud, keepDevice, later }
 /// aplicativo ao primeiro plano podem pedir a mesma decisão.
 bool _conflictDialogOpen = false;
 
+/// Libera a trava entre testes de widget, onde a tela é descartada antes de a
+/// escolha terminar. Em produção a trava é sempre liberada ao fim da pergunta.
+@visibleForTesting
+void resetSyncConflictDialogGuard() => _conflictDialogOpen = false;
+
 /// Pergunta ao usuário qual versão manter. Nunca decide sozinha.
 Future<SyncConflictChoice?> showSyncConflictDialog(
   BuildContext context,
