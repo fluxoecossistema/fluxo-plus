@@ -378,8 +378,8 @@ class CloudSyncService {
       // A marca da última sincronização continua como estava de propósito:
       // assim o próximo backup reconhece que estes dados mudaram e os envia.
       return SyncOutcome.restored(_clock());
-    } catch (error) {
-      return _recordFailure(error);
+    } catch (_) {
+      return _failWith('Não foi possível desfazer a restauração.');
     }
   }
 
@@ -506,7 +506,7 @@ class CloudSyncService {
       cloudUpdatedAt: stamp,
       localHash: snapshotHash(snapshot),
     );
-    return SyncOutcome.uploaded(DateTime.parse(stamp));
+    return SyncOutcome.uploaded(DateTime.tryParse(stamp) ?? _clock());
   }
 
   Future<SyncOutcome> _restore({CloudBackup? backup}) async {
@@ -525,7 +525,7 @@ class CloudSyncService {
       cloudUpdatedAt: stamp,
       localHash: snapshotHash(await _store.exportSnapshot()),
     );
-    return SyncOutcome.restored(DateTime.parse(stamp));
+    return SyncOutcome.restored(DateTime.tryParse(stamp) ?? _clock());
   }
 
   Future<SyncOutcome> _conflict(
