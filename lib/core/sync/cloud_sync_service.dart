@@ -170,8 +170,7 @@ class CloudSyncService {
     }
 
     // Dispositivo novo sem dados locais: restaura o backup automaticamente.
-    final hasData = await _database.hasLocalData();
-    if (!hasData) {
+    if (await _database.isPristine()) {
       await _database.restoreSnapshot(
         Map<String, dynamic>.from(row['payload'] as Map),
       );
