@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/category_icons.dart';
+import '../../../core/utils/currency_input_formatter.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/models/account.dart';
 import '../../../shared/models/category.dart';
@@ -46,7 +48,7 @@ class _NewTransactionScreenState extends State<NewTransactionScreen> {
       _type = transaction.type;
       _date = transaction.date;
       _amountController.text =
-          transaction.amount.toStringAsFixed(2).replaceAll('.', ',');
+          CurrencyInputFormatter.format(transaction.amount);
       _nameController.text = transaction.description;
       _installmentsController.text = transaction.installmentCount.toString();
       _isPaid = transaction.isPaid;
@@ -196,6 +198,7 @@ class _NewTransactionScreenState extends State<NewTransactionScreen> {
                             autofocus: true,
                             maxLength: 80,
                             textCapitalization: TextCapitalization.sentences,
+                            textInputAction: TextInputAction.next,
                             decoration: const InputDecoration(
                               labelText: 'Nome da transação',
                               hintText: 'Ex.: Internet de casa',
@@ -209,14 +212,14 @@ class _NewTransactionScreenState extends State<NewTransactionScreen> {
                           const SizedBox(height: 4),
                           TextFormField(
                             controller: _amountController,
-                            keyboardType: const TextInputType.numberWithOptions(
-                              decimal: true,
-                            ),
+                            keyboardType: TextInputType.number,
+                            textInputAction: TextInputAction.next,
+                            inputFormatters: const [CurrencyInputFormatter()],
                             decoration: InputDecoration(
                               labelText: widget.transaction == null
                                   ? 'Valor de cada parcela'
                                   : 'Valor',
-                              prefixText: r'R$ ',
+                              hintText: r'R$ 0,00',
                               prefixIcon:
                                   const Icon(Icons.attach_money_rounded),
                             ),
@@ -233,6 +236,10 @@ class _NewTransactionScreenState extends State<NewTransactionScreen> {
                             controller: _installmentsController,
                             enabled: widget.transaction == null,
                             keyboardType: TextInputType.number,
+                            textInputAction: TextInputAction.done,
+                            inputFormatters: [
+                              FilteringTextInputFormatter.digitsOnly,
+                            ],
                             decoration: InputDecoration(
                               labelText: 'Parcelas',
                               helperText: widget.transaction == null

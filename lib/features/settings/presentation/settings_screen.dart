@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/theme/app_colors.dart';
@@ -299,6 +300,7 @@ class _CloudSyncPanelState extends State<_CloudSyncPanel> {
     final email = TextEditingController();
     final password = TextEditingController();
     var createAccount = false;
+    var obscurePassword = true;
     final key = GlobalKey<FormState>();
     final confirmed = await showDialog<bool>(
       context: context,
@@ -307,48 +309,81 @@ class _CloudSyncPanelState extends State<_CloudSyncPanel> {
           title: Text(createAccount ? 'Criar conta' : 'Entrar no Fluxo+'),
           content: Form(
             key: key,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (createAccount) ...[
-                  TextFormField(
-                    controller: name,
-                    textCapitalization: TextCapitalization.words,
-                    decoration: const InputDecoration(
-                      labelText: 'Como podemos chamar você?',
+            child: AutofillGroup(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (createAccount) ...[
+                    TextFormField(
+                      controller: name,
+                      textCapitalization: TextCapitalization.words,
+                      textInputAction: TextInputAction.next,
+                      decoration: const InputDecoration(
+                        labelText: 'Como podemos chamar você?',
+                      ),
+                      validator: (value) =>
+                          value == null || value.trim().isEmpty
+                              ? 'Informe seu nome'
+                              : null,
                     ),
-                    validator: (value) => value == null || value.trim().isEmpty
-                        ? 'Informe seu nome'
-                        : null,
+                    const SizedBox(height: 12),
+                  ],
+                  TextFormField(
+                    controller: email,
+                    keyboardType: TextInputType.emailAddress,
+                    autofillHints: const [AutofillHints.email],
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(labelText: 'E-mail'),
+                    validator: (value) => value != null && value.contains('@')
+                        ? null
+                        : 'Informe um e-mail válido',
                   ),
                   const SizedBox(height: 12),
-                ],
-                TextFormField(
-                  controller: email,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(labelText: 'E-mail'),
-                  validator: (value) => value != null && value.contains('@')
-                      ? null
-                      : 'Informe um e-mail válido',
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: password,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Senha'),
-                  validator: (value) => (value?.length ?? 0) < 6
-                      ? 'Use pelo menos 6 caracteres'
-                      : null,
-                ),
-                const SizedBox(height: 8),
-                TextButton(
-                  onPressed: () =>
-                      setDialogState(() => createAccount = !createAccount),
-                  child: Text(
-                    createAccount ? 'Já tenho uma conta' : 'Criar uma conta',
+                  TextFormField(
+                    controller: password,
+                    obscureText: obscurePassword,
+                    autofillHints: [
+                      createAccount
+                          ? AutofillHints.newPassword
+                          : AutofillHints.password,
+                    ],
+                    textInputAction: TextInputAction.done,
+                    decoration: InputDecoration(
+                      labelText: 'Senha',
+                      suffixIcon: IconButton(
+                        tooltip:
+                            obscurePassword ? 'Mostrar senha' : 'Ocultar senha',
+                        onPressed: () => setDialogState(
+                          () => obscurePassword = !obscurePassword,
+                        ),
+                        icon: Icon(
+                          obscurePassword
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                        ),
+                      ),
+                    ),
+                    validator: (value) => (value?.length ?? 0) < 6
+                        ? 'Use pelo menos 6 caracteres'
+                        : null,
+                    onFieldSubmitted: (_) {
+                      if (key.currentState!.validate()) {
+                        Navigator.pop(context, true);
+                      }
+                    },
                   ),
-                ),
-              ],
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: () =>
+                        setDialogState(() => createAccount = !createAccount),
+                    child: Text(
+                      createAccount ? 'Já tenho uma conta' : 'Criar uma conta',
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           actions: [
@@ -449,6 +484,11 @@ class _CloudSyncPanelState extends State<_CloudSyncPanel> {
                 controller: code,
                 autofocus: true,
                 keyboardType: TextInputType.number,
+                inputFormatters: [
+                  // Also handles pasted text such as "12 34 56 78".
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(8),
+                ],
                 maxLength: 8,
                 decoration: const InputDecoration(
                   labelText: 'Código de confirmação',
