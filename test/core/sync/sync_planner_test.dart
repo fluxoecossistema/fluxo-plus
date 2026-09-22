@@ -223,7 +223,11 @@ void main() {
             .map((item) => item.expected.reason)
             .whereType<SyncConflictReason>()
             .toSet(),
-        SyncConflictReason.values.toSet(),
+        {
+          SyncConflictReason.differentAccount,
+          SyncConflictReason.firstSync,
+          SyncConflictReason.bothChanged,
+        },
       );
     });
   });
@@ -296,6 +300,16 @@ void main() {
         if (combination['pristine'] == false) continue;
         expect(planFor(combination).isConflict, isFalse,
             reason: '$combination');
+      }
+    });
+
+    test('o planejador nunca decide sozinho por "nuvem mais recente"', () {
+      for (final combination in combinations) {
+        expect(
+          planFor(combination).reason,
+          isNot(SyncConflictReason.cloudIsNewer),
+          reason: '$combination',
+        );
       }
     });
 

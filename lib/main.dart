@@ -6,7 +6,9 @@ import 'core/database/app_database.dart';
 import 'core/database/database_factory.dart';
 import 'core/update/update_service.dart';
 import 'core/security/biometric_service.dart';
+import 'core/sync/cloud_backup_gateway.dart';
 import 'core/sync/cloud_sync_service.dart';
+import 'core/sync/local_backup_store.dart';
 import 'core/premium/premium_service.dart';
 import 'features/dashboard/data/dashboard_repository.dart';
 import 'features/accounts/data/account_repository.dart';
@@ -40,7 +42,13 @@ Future<void> main() async {
       categoryRepository: CategoryRepository(database),
       goalRepository: GoalRepository(database),
       reportRepository: ReportRepository(database),
-      cloudSyncService: CloudSyncService(database, supabaseClient),
+      cloudSyncService: CloudSyncService(
+        store: DatabaseBackupStore(database),
+        gateway: supabaseClient == null
+            ? null
+            : SupabaseCloudBackupGateway(supabaseClient),
+        client: supabaseClient,
+      ),
       premiumService: PremiumService(database, supabaseClient),
       biometricService: BiometricService(),
     ),

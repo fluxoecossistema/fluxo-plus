@@ -31,6 +31,11 @@ enum SyncConflictReason {
   /// Houve mudança neste aparelho e em outro aparelho desde a última
   /// sincronização.
   bothChanged,
+
+  /// O backup da nuvem é mais recente do que o que este aparelho tem. Não sai
+  /// do planejador: só aparece quando o usuário pede um backup manual e a
+  /// escolha passa a ser dele.
+  cloudIsNewer,
 }
 
 /// Resultado do [SyncPlanner].
