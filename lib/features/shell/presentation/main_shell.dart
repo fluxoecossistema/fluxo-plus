@@ -201,7 +201,7 @@ class _MainShellState extends State<MainShell> {
               body: _showMobileMore
                   ? _MobileMore(
                       userName: widget.cloudSyncService.displayName,
-                      email: widget.cloudSyncService.currentUser?.email,
+                      email: widget.cloudSyncService.accountEmail,
                       onSelected: (index) => setState(() {
                         _selectedIndex = index;
                         _showMobileMore = false;
