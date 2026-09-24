@@ -1014,4 +1014,104 @@ void main() {
       );
     });
   });
+
+  group('limites de tempo', () {
+    test('(N1) chamada travada falha sozinha e libera a fila', () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Café']));
+      final gateway = FakeCloudGateway()
+        ..failure = TimeoutException('a nuvem não respondeu');
+      final service = _service(store, gateway);
+
+      final hung = await service.synchronize(interactive: false);
+
+      expect(hung.status, SyncStatus.skipped);
+      expect(hung.skipReason, SyncSkipReason.offline);
+      expect(store.settings[CloudSyncService.keyLastError], isNotNull);
+
+      gateway.failure = null;
+      final next = await service.uploadBackupNow();
+
+      expect(next.status, SyncStatus.uploaded, reason: 'a fila seguiu adiante');
+      expect(store.settings[CloudSyncService.keyLastError], isNull);
+    });
+
+    test('(N3) o tempo limite de quem espera não inventa erro de conexão',
+        () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Café']));
+      final gateway = FakeCloudGateway();
+      final service = _service(store, gateway);
+      gateway.gate = Completer<void>();
+
+      final outcome = await service.synchronize(
+        interactive: false,
+        timeout: const Duration(milliseconds: 20),
+      );
+
+      expect(outcome.status, SyncStatus.skipped);
+      expect(outcome.skipReason, SyncSkipReason.offline);
+      expect(store.settings[CloudSyncService.keyLastError], isNull);
+
+      // A operação continua na fila e termina bem, sem deixar erro nenhum.
+      gateway.gate!.complete();
+      for (var tries = 0; tries < 50 && gateway.uploads == 0; tries++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(gateway.uploads, 1);
+      expect(store.settings[CloudSyncService.keyLastError], isNull);
+      expect(store.settings[CloudSyncService.keyLocalHash], isNotNull);
+    });
+  });
+
+  group('cópia para desfazer é do usuário', () {
+    test('(N2) sincronização interativa não apaga a cópia do usuário',
+        () async {
+      final original = _snapshot(['Original']);
+      final store = FakeLocalStore(snapshot: original);
+      final gateway = FakeCloudGateway(
+        backup: _cloudBackup(_snapshot(['Nuvem 1'])),
+      );
+      final service = _service(store, gateway);
+
+      await service.restoreFromCloud();
+      final copyAt = (await service.status()).undoAvailableAt;
+
+      // Outro aparelho grava; aqui nada mudou: o plano é restaurar de novo.
+      gateway.backup = _cloudBackup(
+        _snapshot(['Nuvem 2']),
+        updatedAt: '2026-09-22T08:00:00.000Z',
+      );
+      final sync = await service.synchronize(interactive: true);
+
+      expect(sync.status, SyncStatus.restored);
+      expect((await service.status()).undoAvailableAt, copyAt);
+
+      await service.undoLastRestore();
+      expect(snapshotHash(store.snapshot), snapshotHash(original));
+    });
+
+    test('(N2) sem cópia guardada, qualquer restauração guarda uma', () async {
+      final original = _snapshot(['Original']);
+      final store = FakeLocalStore(snapshot: original);
+      final gateway = FakeCloudGateway(
+        backup: _cloudBackup(
+          _snapshot(['Da nuvem']),
+          updatedAt: '2026-09-21T08:00:00.000Z',
+        ),
+      );
+      // Outro aparelho gravou e aqui nada mudou: o plano é restaurar.
+      _link(
+        store,
+        cloudUpdatedAt: '2026-09-20T09:00:00.000Z',
+        localSnapshot: original,
+      );
+      final service = _service(store, gateway);
+
+      expect((await service.synchronize(interactive: false)).status,
+          SyncStatus.restored);
+      expect((await service.status()).canUndoRestore, isTrue);
+
+      await service.undoLastRestore();
+      expect(snapshotHash(store.snapshot), snapshotHash(original));
+    });
+  });
 }

@@ -358,7 +358,7 @@ class CloudSyncService {
   /// Substitui os dados deste aparelho pelo backup, guardando antes uma cópia
   /// para o "Desfazer".
   Future<SyncOutcome> restoreFromCloud() =>
-      _enqueue(() => _restore(interactive: true));
+      _enqueue(() => _restore(replaceUndoCopy: true));
 
   /// Resolve o conflito mantendo o que está neste aparelho.
   Future<SyncOutcome> keepThisDevice() =>
@@ -474,9 +474,11 @@ class CloudSyncService {
     });
     final queued = completer.future;
     if (timeout == null) return queued;
+    // Só a espera termina: a operação continua na fila e é ela quem registra
+    // o próprio resultado, bom ou ruim.
     return queued.timeout(
       timeout,
-      onTimeout: () => _recordFailure(TimeoutException('backup')),
+      onTimeout: () => const SyncOutcome.skipped(SyncSkipReason.offline),
     );
   }
 
@@ -510,7 +512,7 @@ class CloudSyncService {
       case SyncAction.uploadLocal:
         return _upload(situation.local);
       case SyncAction.restoreCloud:
-        return _restore(backup: situation.backup, interactive: interactive);
+        return _restore(backup: situation.backup, replaceUndoCopy: false);
       case SyncAction.conflict:
         return _conflict(situation.plan.reason!, interactive: interactive);
     }
@@ -600,13 +602,13 @@ class CloudSyncService {
 
   Future<SyncOutcome> _restore({
     CloudBackup? backup,
-    required bool interactive,
+    required bool replaceUndoCopy,
   }) async {
     final cloud = backup ?? await _gateway!.fetchBackup();
     if (cloud == null) {
       return _failWith('Ainda não há backup nesta conta.');
     }
-    await _saveUndoCopy(interactive: interactive);
+    await _saveUndoCopy(replaceExisting: replaceUndoCopy);
     await _store.restoreSnapshot(cloud.payload);
     final stamp = _normalize(cloud.updatedAt)!;
     await _recordSuccess(
@@ -617,10 +619,11 @@ class CloudSyncService {
   }
 
   /// Guarda os dados atuais e as marcas da sincronização antes de substituir
-  /// tudo. Uma restauração automática nunca apaga a cópia que o usuário ainda
-  /// pode querer de volta: vale sempre a mais antiga.
-  Future<void> _saveUndoCopy({required bool interactive}) async {
-    if (!interactive && await _store.readSetting(keyPreRestoreAt) != null) {
+  /// tudo. Só uma restauração pedida pelo usuário troca a cópia existente:
+  /// qualquer restauração vinda de uma sincronização mantém a mais antiga, que
+  /// é a que o usuário pode querer de volta.
+  Future<void> _saveUndoCopy({required bool replaceExisting}) async {
+    if (!replaceExisting && await _store.readSetting(keyPreRestoreAt) != null) {
       return;
     }
     final at = _clock().toUtc().toIso8601String();

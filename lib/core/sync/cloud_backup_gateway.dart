@@ -36,6 +36,10 @@ class SupabaseCloudBackupGateway implements CloudBackupGateway {
 
   static const _table = 'user_backups';
 
+  /// Uma chamada que não responde precisa falhar sozinha: senão a fila de
+  /// operações do aplicativo ficaria presa nela para sempre.
+  static const _requestTimeout = Duration(seconds: 30);
+
   final SupabaseClient _client;
 
   @override
@@ -50,7 +54,8 @@ class SupabaseCloudBackupGateway implements CloudBackupGateway {
         .from(_table)
         .select('updated_at')
         .eq('user_id', _userId)
-        .maybeSingle();
+        .maybeSingle()
+        .timeout(_requestTimeout);
     return row?['updated_at'] as String?;
   }
 
@@ -60,7 +65,8 @@ class SupabaseCloudBackupGateway implements CloudBackupGateway {
         .from(_table)
         .select('payload, updated_at')
         .eq('user_id', _userId)
-        .maybeSingle();
+        .maybeSingle()
+        .timeout(_requestTimeout);
     if (row == null) return null;
     return CloudBackup(
       updatedAt: row['updated_at'] as String,
@@ -80,7 +86,8 @@ class SupabaseCloudBackupGateway implements CloudBackupGateway {
           'updated_at': DateTime.now().toUtc().toIso8601String(),
         })
         .select('updated_at')
-        .single();
+        .single()
+        .timeout(_requestTimeout);
     return row['updated_at'] as String;
   }
 

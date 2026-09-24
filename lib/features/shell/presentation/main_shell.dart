@@ -75,6 +75,9 @@ class _MainShellState extends State<MainShell> {
   TransactionType? _transactionType;
   int _transactionRevision = 0;
 
+  /// Recarrega as telas que só leem dados quando um backup substitui tudo.
+  int _sectionRevision = 0;
+
   static const _items = [
     (Icons.grid_view_rounded, 'Dashboard'),
     (Icons.swap_horiz_rounded, 'Transações'),
@@ -93,6 +96,7 @@ class _MainShellState extends State<MainShell> {
       setState(() {
         _dashboardRevision++;
         _transactionRevision++;
+        _sectionRevision++;
       });
     }
   }
@@ -183,10 +187,22 @@ class _MainShellState extends State<MainShell> {
           onChanged: () => setState(() => _dashboardRevision++),
           initialType: _transactionType,
         ),
-      2 => AccountsScreen(repository: widget.accountRepository),
-      3 => GoalsScreen(repository: widget.goalRepository),
-      4 => ReportsScreen(repository: widget.reportRepository),
-      5 => CategoriesScreen(repository: widget.categoryRepository),
+      2 => AccountsScreen(
+          key: ValueKey(_sectionRevision),
+          repository: widget.accountRepository,
+        ),
+      3 => GoalsScreen(
+          key: ValueKey(_sectionRevision),
+          repository: widget.goalRepository,
+        ),
+      4 => ReportsScreen(
+          key: ValueKey(_sectionRevision),
+          repository: widget.reportRepository,
+        ),
+      5 => CategoriesScreen(
+          key: ValueKey(_sectionRevision),
+          repository: widget.categoryRepository,
+        ),
       6 => SettingsScreen(
           themeMode: widget.themeMode,
           onThemeChanged: widget.onThemeChanged,
