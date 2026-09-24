@@ -12,12 +12,14 @@ SyncConflictInfo _info({
     accounts: 2,
     goals: 1,
   ),
+  bool? cloudExists = true,
   DateTime? cloudUpdatedAt,
 }) {
   return SyncConflictInfo(
     reason: reason,
     local: const SnapshotCounts(transactions: 1, accounts: 1, goals: 0),
     cloud: cloud,
+    cloudExists: cloudExists,
     cloudUpdatedAt: cloudUpdatedAt ?? DateTime(2026, 9, 20, 18, 30),
     accountEmail: 'pessoa@fluxo.app',
   );
@@ -136,6 +138,24 @@ void main() {
       await tester.tap(find.text('Decidir depois'));
       await tester.pumpAndSettle();
     }
+  });
+
+  testWidgets('sem backup na conta, não oferece usar a nuvem', (tester) async {
+    await open(
+      tester,
+      _info(cloud: null, cloudExists: false, cloudUpdatedAt: null),
+    );
+
+    expect(find.text('Usar os dados da nuvem'), findsNothing);
+    expect(find.text('Manter os dados deste aparelho'), findsOneWidget);
+    expect(find.textContaining('ainda não tem backup'), findsOneWidget);
+
+    await tester.tap(find.text('Manter os dados deste aparelho'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manter estes dados'));
+    await tester.pumpAndSettle();
+
+    expect(choice, SyncConflictChoice.keepDevice);
   });
 
   testWidgets('sem conseguir ler o backup, ainda mostra este aparelho',

@@ -134,12 +134,18 @@ class _SyncConflictDialog extends StatelessWidget {
             _SideSummary(
               icon: Icons.cloud_outlined,
               title: 'Na nuvem',
-              detail: info.cloudUpdatedAt == null
-                  ? 'Backup da sua conta'
-                  : 'Backup de ${AppFormatters.dateTime(info.cloudUpdatedAt!)}',
-              summary: info.cloud == null
-                  ? 'Não foi possível ler o conteúdo agora.'
-                  : _countsSummary(info.cloud!),
+              detail: switch (info.cloudExists) {
+                false => 'Esta conta ainda não tem backup',
+                _ when info.cloudUpdatedAt == null => 'Backup da sua conta',
+                _ => 'Backup de '
+                    '${AppFormatters.dateTime(info.cloudUpdatedAt!)}',
+              },
+              summary: switch (info.cloudExists) {
+                false => 'Não há nada para trazer para este aparelho.',
+                _ when info.cloud == null =>
+                  'Não foi possível ler o conteúdo agora.',
+                _ => _countsSummary(info.cloud!),
+              },
             ),
             const SizedBox(height: 10),
             _SideSummary(
@@ -166,10 +172,13 @@ class _SyncConflictDialog extends StatelessWidget {
               Navigator.pop(context, SyncConflictChoice.keepDevice),
           child: const Text('Manter os dados deste aparelho'),
         ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, SyncConflictChoice.useCloud),
-          child: const Text('Usar os dados da nuvem'),
-        ),
+        // Sem backup na conta não há versão da nuvem para escolher.
+        if (info.cloudExists != false)
+          FilledButton(
+            onPressed: () =>
+                Navigator.pop(context, SyncConflictChoice.useCloud),
+            child: const Text('Usar os dados da nuvem'),
+          ),
       ],
     );
   }
@@ -254,20 +263,28 @@ class _CloudBackupPanelState extends State<CloudBackupPanel> {
     if (!mounted || !widget.service.isSignedIn) return;
     final status = await widget.service.status();
     if (!mounted || !status.pendingConflict) return;
-    await _resolveConflict();
+    // Quem escolheu "decidir depois" não é perguntado de novo sozinho.
+    await _resolveConflict(ignoreSnooze: false);
   }
 
   void _refresh() {
     if (mounted) setState(() => _status = widget.service.status());
   }
 
-  Future<void> _resolveConflict([SyncConflictInfo? known]) async {
-    final info = known ?? await widget.service.pendingConflict();
+  Future<void> _resolveConflict({
+    SyncConflictInfo? known,
+    bool ignoreSnooze = true,
+  }) async {
+    final info = known ??
+        await widget.service.pendingConflict(ignoreSnooze: ignoreSnooze);
     if (!mounted || info == null) {
       _refresh();
       return;
     }
     final choice = await showSyncConflictDialog(context, info);
+    if (choice == SyncConflictChoice.later) {
+      await widget.service.snoozeConflict();
+    }
     if (!mounted || choice == null || choice == SyncConflictChoice.later) {
       _refresh();
       return;
@@ -288,7 +305,7 @@ class _CloudBackupPanelState extends State<CloudBackupPanel> {
       if (outcome.changedData) widget.onDataChanged();
       if (outcome.isConflict) {
         _refresh();
-        await _resolveConflict(outcome.conflict);
+        await _resolveConflict(known: outcome.conflict);
         return;
       }
       _message(_outcomeMessage(outcome));
@@ -303,6 +320,8 @@ class _CloudBackupPanelState extends State<CloudBackupPanel> {
       SyncStatus.uploaded => 'Backup enviado para a nuvem.',
       SyncStatus.restored => 'Os dados do backup estão neste aparelho.',
       SyncStatus.alreadyInSync => 'Seu backup já está em dia.',
+      SyncStatus.nothingToSend => 'Ainda não há nada para enviar — seu backup '
+          'começa quando você registrar algo.',
       SyncStatus.conflict => 'Escolha qual versão manter.',
       SyncStatus.failed =>
         outcome.message ?? 'Não foi possível concluir o backup agora.',
@@ -569,15 +588,22 @@ class _CloudBackupPanelState extends State<CloudBackupPanel> {
     }
   }
 
-  Future<void> _confirmRestore(BackupStatus status) async {
+  Future<void> _confirmRestore() async {
+    // A data vem da nuvem agora: a última que este aparelho viu pode estar
+    // velha e descrever outro backup.
+    setState(() => _busy = true);
+    final cloudDate = await widget.service.cloudBackupDate();
+    if (!mounted) return;
+    setState(() => _busy = false);
     final confirmed = await _confirm(
       context,
       title: 'Restaurar o backup?',
-      message: status.lastBackupAt == null
-          ? 'Os dados deste aparelho serão substituídos pelo backup da sua '
-              'conta. Dá para desfazer logo em seguida, aqui em Configurações.'
+      message: cloudDate == null
+          ? 'Os dados deste aparelho serão substituídos pelo backup mais '
+              'recente da nuvem. Dá para desfazer logo em seguida, aqui em '
+              'Configurações.'
           : 'Os dados deste aparelho serão substituídos pelo backup de '
-              '${AppFormatters.dateTime(status.lastBackupAt!)}. Dá para '
+              '${AppFormatters.dateTime(cloudDate)}. Dá para '
               'desfazer logo em seguida, aqui em Configurações.',
       confirmLabel: 'Restaurar',
     );
@@ -724,20 +750,23 @@ class _CloudBackupPanelState extends State<CloudBackupPanel> {
           const SizedBox(width: 10),
           Expanded(
             child: OutlinedButton.icon(
-              onPressed: _busy ? null : () => _confirmRestore(status),
+              onPressed: _busy ? null : _confirmRestore,
               icon: const Icon(Icons.cloud_download_outlined),
               label: const Text('Restaurar do backup'),
             ),
           ),
         ],
       ),
-      if (status.canUndoRestore)
+      if (status.undoAvailableAt != null)
         Align(
           alignment: Alignment.centerLeft,
           child: TextButton.icon(
             onPressed: _busy ? null : _confirmUndo,
             icon: const Icon(Icons.undo_rounded),
-            label: const Text('Desfazer última restauração'),
+            label: Text(
+              'Desfazer a restauração de '
+              '${AppFormatters.shortDateTime(status.undoAvailableAt!)}',
+            ),
           ),
         ),
       Align(

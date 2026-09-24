@@ -173,6 +173,11 @@ class _FluxoAppState extends State<FluxoApp> with WidgetsBindingObserver {
     final context = _navigatorKey.currentContext;
     if (info == null || context == null || !context.mounted) return;
     final choice = await showSyncConflictDialog(context, info);
+    if (choice == SyncConflictChoice.later) {
+      // Decidir depois não vira insistência: a pergunta automática fica quieta
+      // e o aviso continua em Configurações.
+      await widget.cloudSyncService.snoozeConflict();
+    }
     if (choice == null || choice == SyncConflictChoice.later) return;
     final outcome = choice == SyncConflictChoice.useCloud
         ? await widget.cloudSyncService.useCloudVersion()
@@ -253,7 +258,7 @@ class _FluxoAppState extends State<FluxoApp> with WidgetsBindingObserver {
         false => OnboardingScreen(onComplete: _completeOnboarding),
         true when !_unlocked => _LockScreen(onUnlock: _unlock),
         true => MainShell(
-            key: ValueKey(_dataRevision),
+            dataRevision: _dataRevision,
             dashboardRepository: widget.dashboardRepository,
             transactionRepository: widget.transactionRepository,
             themeMode: _themeMode,

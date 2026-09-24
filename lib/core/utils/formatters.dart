@@ -8,12 +8,17 @@ abstract final class AppFormatters {
   );
   static final _date = DateFormat('dd/MM/yyyy');
   static final _dateTime = DateFormat('dd/MM/yyyy HH:mm');
+  static final _shortDateTime = DateFormat('dd/MM HH:mm');
 
   static String currency(double value) => _currency.format(value);
   static String date(DateTime value) => _date.format(value);
 
   /// Data e hora no formato brasileiro (`20/09/2026 18:30`).
   static String dateTime(DateTime value) => _dateTime.format(value.toLocal());
+
+  /// Data e hora sem o ano, para textos curtos (`20/09 18:30`).
+  static String shortDateTime(DateTime value) =>
+      _shortDateTime.format(value.toLocal());
 
   /// Parses a money amount typed, pasted or produced by
   /// `CurrencyInputFormatter` (`R$ 1.234,56` -> 1234.56).

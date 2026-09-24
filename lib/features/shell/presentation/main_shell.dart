@@ -42,6 +42,7 @@ class MainShell extends StatefulWidget {
     required this.availableUpdate,
     required this.onOpenUpdate,
     required this.premiumService,
+    this.dataRevision = 0,
   });
 
   final DashboardRepository dashboardRepository;
@@ -59,6 +60,9 @@ class MainShell extends StatefulWidget {
   final AppUpdate? availableUpdate;
   final VoidCallback onOpenUpdate;
   final PremiumService premiumService;
+
+  /// Muda quando um backup substitui os dados deste aparelho.
+  final int dataRevision;
 
   @override
   State<MainShell> createState() => _MainShellState();
@@ -81,6 +85,17 @@ class _MainShellState extends State<MainShell> {
     (Icons.settings_outlined, 'Configurações'),
     (Icons.workspace_premium_outlined, 'Premium'),
   ];
+
+  @override
+  void didUpdateWidget(MainShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.dataRevision != oldWidget.dataRevision) {
+      setState(() {
+        _dashboardRevision++;
+        _transactionRevision++;
+      });
+    }
+  }
 
   Future<void> _addTransaction() async {
     final saved = await Navigator.of(context).push<bool>(
