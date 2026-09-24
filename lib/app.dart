@@ -19,6 +19,7 @@ import 'features/categories/data/category_repository.dart';
 import 'features/goals/data/goal_repository.dart';
 import 'features/reports/data/report_repository.dart';
 import 'features/onboarding/presentation/onboarding_screen.dart';
+import 'features/settings/presentation/cloud_backup_panel.dart';
 import 'features/shell/presentation/main_shell.dart';
 import 'features/splash/presentation/splash_screen.dart';
 import 'features/transactions/data/transaction_repository.dart';
@@ -65,6 +66,10 @@ class _FluxoAppState extends State<FluxoApp> with WidgetsBindingObserver {
   bool _biometricEnabled = false;
   bool _unlocked = true;
 
+  /// Muda quando um backup substitui os dados deste aparelho, para as telas
+  /// serem reconstruídas com as informações novas.
+  int _dataRevision = 0;
+
   @override
   void initState() {
     super.initState();
@@ -80,12 +85,14 @@ class _FluxoAppState extends State<FluxoApp> with WidgetsBindingObserver {
       setState(() => _unlocked = false);
     }
     if (state == AppLifecycleState.paused &&
-        widget.cloudSyncService.currentUser != null) {
+        widget.cloudSyncService.isSignedIn) {
+      // Melhor esforço ao sair: o backup nunca segura o fechamento do app e
+      // uma falha fica registrada para aparecer em Configurações.
       unawaited(
-        widget.cloudSyncService
-            .uploadBackup()
-            .then<void>((_) {})
-            .catchError((_) {}),
+        widget.cloudSyncService.synchronize(
+          interactive: false,
+          timeout: const Duration(seconds: 8),
+        ),
       );
     }
     if (state == AppLifecycleState.resumed &&
@@ -96,7 +103,7 @@ class _FluxoAppState extends State<FluxoApp> with WidgetsBindingObserver {
       WidgetsBinding.instance.addPostFrameCallback((_) => _checkForUpdates());
     }
     if (state == AppLifecycleState.resumed &&
-        widget.cloudSyncService.currentUser != null) {
+        widget.cloudSyncService.isSignedIn) {
       unawaited(_syncSilently());
     }
   }
@@ -134,7 +141,7 @@ class _FluxoAppState extends State<FluxoApp> with WidgetsBindingObserver {
         },
       );
       if (biometricEnabled) await _unlock();
-      if (widget.cloudSyncService.currentUser != null) {
+      if (widget.cloudSyncService.isSignedIn) {
         unawaited(_syncSilently());
       }
     }
@@ -149,13 +156,36 @@ class _FluxoAppState extends State<FluxoApp> with WidgetsBindingObserver {
     if (mounted) setState(() => _onboardingComplete = true);
   }
 
+  /// Sincronização automática: nunca pergunta nada e nunca apaga dados sem o
+  /// plano autorizar. Um conflito só fica marcado e é perguntado depois, com o
+  /// aplicativo em primeiro plano.
   Future<void> _syncSilently() async {
-    try {
-      await widget.cloudSyncService.synchronize();
-    } catch (error) {
-      debugPrint('Sincronização adiada: $error');
-    }
+    final outcome =
+        await widget.cloudSyncService.synchronize(interactive: false);
+    if (!mounted) return;
+    if (outcome.changedData) setState(() => _dataRevision++);
+    if (outcome.isConflict) await _askAboutConflict();
   }
+
+  Future<void> _askAboutConflict() async {
+    if (!_onboardingDone || !_unlocked) return;
+    final info = await widget.cloudSyncService.pendingConflict();
+    final context = _navigatorKey.currentContext;
+    if (info == null || context == null || !context.mounted) return;
+    final choice = await showSyncConflictDialog(context, info);
+    if (choice == SyncConflictChoice.later) {
+      // Decidir depois não vira insistência: a pergunta automática fica quieta
+      // e o aviso continua em Configurações.
+      await widget.cloudSyncService.snoozeConflict();
+    }
+    if (choice == null || choice == SyncConflictChoice.later) return;
+    final outcome = choice == SyncConflictChoice.useCloud
+        ? await widget.cloudSyncService.useCloudVersion()
+        : await widget.cloudSyncService.keepThisDevice();
+    if (mounted && outcome.changedData) setState(() => _dataRevision++);
+  }
+
+  bool get _onboardingDone => _onboardingComplete == true;
 
   Future<void> _checkForUpdates() async {
     if (_updateChecked || !widget.updateService.isConfigured) return;
@@ -228,6 +258,7 @@ class _FluxoAppState extends State<FluxoApp> with WidgetsBindingObserver {
         false => OnboardingScreen(onComplete: _completeOnboarding),
         true when !_unlocked => _LockScreen(onUnlock: _unlock),
         true => MainShell(
+            dataRevision: _dataRevision,
             dashboardRepository: widget.dashboardRepository,
             transactionRepository: widget.transactionRepository,
             themeMode: _themeMode,

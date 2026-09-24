@@ -10,6 +10,57 @@ class AppDatabase {
   final DatabaseFactory _factory;
   Database? _database;
 
+  /// Contas criadas junto com o banco, na primeira abertura.
+  static const seedAccounts = <({String name, double initialBalance})>[
+    (name: 'Conta principal', initialBalance: 0),
+  ];
+
+  /// Categorias criadas junto com o banco, na primeira abertura.
+  static const seedCategories =
+      <({String name, String type, String icon, int color})>[
+    (name: 'Salário', type: 'income', icon: 'payments', color: 0xFF0F9D58),
+    (name: 'Freelance', type: 'income', icon: 'work', color: 0xFF0B6B3A),
+    (
+      name: 'Outras receitas',
+      type: 'income',
+      icon: 'add_circle',
+      color: 0xFF64748B
+    ),
+    (
+      name: 'Alimentação',
+      type: 'expense',
+      icon: 'restaurant',
+      color: 0xFFE53935
+    ),
+    (name: 'Moradia', type: 'expense', icon: 'home', color: 0xFF7C3AED),
+    (
+      name: 'Transporte',
+      type: 'expense',
+      icon: 'directions_car',
+      color: 0xFF0284C7
+    ),
+    (
+      name: 'Saúde',
+      type: 'expense',
+      icon: 'medical_services',
+      color: 0xFFDB2777
+    ),
+    (name: 'Lazer', type: 'expense', icon: 'celebration', color: 0xFFF59E0B),
+    (
+      name: 'Cartão de crédito',
+      type: 'expense',
+      icon: 'credit_card',
+      color: 0xFF7C3AED
+    ),
+    (name: 'Internet', type: 'expense', icon: 'wifi', color: 0xFF0284C7),
+    (
+      name: 'Outras despesas',
+      type: 'expense',
+      icon: 'more_horiz',
+      color: 0xFF64748B
+    ),
+  ];
+
   Database get db {
     final value = _database;
     if (value == null) {
@@ -18,12 +69,14 @@ class AppDatabase {
     return value;
   }
 
-  Future<void> initialize() async {
+  /// [path] existe para os testes abrirem um banco em memória; em produção o
+  /// arquivo fica na pasta de suporte do aplicativo.
+  Future<void> initialize({String? path}) async {
     if (_database != null) return;
-    final directory = await getApplicationSupportDirectory();
-    final path = p.join(directory.path, AppConstants.databaseName);
+    final directory =
+        path != null ? null : await getApplicationSupportDirectory();
     _database = await _factory.openDatabase(
-      path,
+      path ?? p.join(directory!.path, AppConstants.databaseName),
       options: OpenDatabaseOptions(
         version: AppConstants.databaseVersion,
         onConfigure: (database) => database.execute('PRAGMA foreign_keys = ON'),
@@ -96,31 +149,19 @@ class AppDatabase {
       );
 
       final now = DateTime.now().toIso8601String();
-      await txn.insert('accounts', {
-        'name': 'Conta principal',
-        'initial_balance': 0.0,
-        'created_at': now,
-      });
-
-      const categories = [
-        ('Salário', 'income', 'payments', 0xFF0F9D58),
-        ('Freelance', 'income', 'work', 0xFF0B6B3A),
-        ('Outras receitas', 'income', 'add_circle', 0xFF64748B),
-        ('Alimentação', 'expense', 'restaurant', 0xFFE53935),
-        ('Moradia', 'expense', 'home', 0xFF7C3AED),
-        ('Transporte', 'expense', 'directions_car', 0xFF0284C7),
-        ('Saúde', 'expense', 'medical_services', 0xFFDB2777),
-        ('Lazer', 'expense', 'celebration', 0xFFF59E0B),
-        ('Cartão de crédito', 'expense', 'credit_card', 0xFF7C3AED),
-        ('Internet', 'expense', 'wifi', 0xFF0284C7),
-        ('Outras despesas', 'expense', 'more_horiz', 0xFF64748B),
-      ];
-      for (final category in categories) {
+      for (final account in seedAccounts) {
+        await txn.insert('accounts', {
+          'name': account.name,
+          'initial_balance': account.initialBalance,
+          'created_at': now,
+        });
+      }
+      for (final category in seedCategories) {
         await txn.insert('categories', {
-          'name': category.$1,
-          'type': category.$2,
-          'icon': category.$3,
-          'color': category.$4,
+          'name': category.name,
+          'type': category.type,
+          'icon': category.icon,
+          'color': category.color,
           'is_default': 1,
         });
       }
@@ -217,10 +258,72 @@ class AppDatabase {
     _database = null;
   }
 
-  Future<bool> hasLocalData() async {
-    final rows = await db.rawQuery('SELECT COUNT(*) AS n FROM transactions');
-    return (rows.first['n'] as int? ?? 0) > 0;
+  /// `true` quando nada foi criado neste aparelho: sem transações, sem metas e
+  /// com as contas e categorias iniciais exatamente como vieram.
+  ///
+  /// É o que autoriza uma restauração automática: não há o que perder.
+  Future<bool> isPristine() async {
+    final counts = await db.rawQuery(
+      'SELECT (SELECT COUNT(*) FROM transactions) AS transactions, '
+      '(SELECT COUNT(*) FROM goals) AS goals',
+    );
+    if ((counts.first['transactions'] as int? ?? 0) > 0) return false;
+    if ((counts.first['goals'] as int? ?? 0) > 0) return false;
+
+    final accounts = await db.query(
+      'accounts',
+      columns: ['name', 'initial_balance'],
+    );
+    final expectedAccounts = [
+      for (final account in seedAccounts)
+        '${account.name}|${account.initialBalance.toStringAsFixed(2)}',
+    ]..sort();
+    final currentAccounts = [
+      for (final row in accounts)
+        '${row['name']}|'
+            '${(row['initial_balance'] as num).toDouble().toStringAsFixed(2)}',
+    ]..sort();
+    if (expectedAccounts.join('\n') != currentAccounts.join('\n')) return false;
+
+    final categories = await db.query(
+      'categories',
+      columns: ['name', 'type', 'icon', 'color'],
+    );
+    final expectedCategories = [
+      for (final category in seedCategories)
+        '${category.name}|${category.type}|${category.icon}|${category.color}',
+    ]..sort();
+    final currentCategories = [
+      for (final row in categories)
+        '${row['name']}|${row['type']}|${row['icon']}|${row['color']}',
+    ]..sort();
+    return expectedCategories.join('\n') == currentCategories.join('\n');
   }
+
+  /// Preferência deste aparelho (tema, biometria, estado do backup). Nunca vai
+  /// para a nuvem — veja [exportSnapshot].
+  Future<String?> readSetting(String key) async {
+    final rows = await db.query(
+      'settings',
+      columns: ['value'],
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first['value'] as String?;
+  }
+
+  Future<void> writeSetting(String key, String value) => db.insert(
+        'settings',
+        {'key': key, 'value': value},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+  Future<void> removeSetting(String key) => db.delete(
+        'settings',
+        where: 'key = ?',
+        whereArgs: [key],
+      );
 
   Future<Map<String, dynamic>> exportSnapshot() async {
     const tables = [
