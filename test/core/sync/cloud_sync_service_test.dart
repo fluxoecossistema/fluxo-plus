@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -49,6 +50,9 @@ class FakeLocalStore implements LocalBackupStore {
   Map<String, dynamic> snapshot;
   bool pristine;
   final Map<String, String> settings = <String, String>{};
+
+  /// Chaves lidas, para provar que `status()` não carrega o snapshot inteiro.
+  final List<String> reads = [];
   int restores = 0;
 
   @override
@@ -66,7 +70,10 @@ class FakeLocalStore implements LocalBackupStore {
   Future<bool> isPristine() async => pristine;
 
   @override
-  Future<String?> readSetting(String key) async => settings[key];
+  Future<String?> readSetting(String key) async {
+    reads.add(key);
+    return settings[key];
+  }
 
   @override
   Future<void> writeSetting(String key, String value) async =>
@@ -85,6 +92,15 @@ class FakeCloudGateway implements CloudBackupGateway {
   int payloadReads = 0;
   Object? failure;
   Duration? delay;
+
+  /// Segura qualquer chamada de rede até ser completado.
+  Completer<void>? gate;
+
+  /// Reescreve a data devolvida por [fetchUpdatedAt] sem mudar o instante.
+  String Function(String)? reformat;
+
+  /// Ordem em que as chamadas de rede começaram.
+  final List<String> calls = [];
   int _stamp = 0;
 
   set userId(String? value) => _userId = value;
@@ -95,27 +111,31 @@ class FakeCloudGateway implements CloudBackupGateway {
   @override
   String? get currentUserEmail => _userId == null ? null : '$_userId@fluxo.app';
 
-  Future<void> _maybeFail() async {
+  Future<void> _maybeFail(String call) async {
+    calls.add(call);
+    if (gate != null) await gate!.future;
     if (delay != null) await Future<void>.delayed(delay!);
     if (failure != null) throw failure!;
   }
 
   @override
   Future<String?> fetchUpdatedAt() async {
-    await _maybeFail();
-    return backup?.updatedAt;
+    await _maybeFail('fetchUpdatedAt');
+    final updatedAt = backup?.updatedAt;
+    if (updatedAt == null) return null;
+    return reformat == null ? updatedAt : reformat!(updatedAt);
   }
 
   @override
   Future<CloudBackup?> fetchBackup() async {
-    await _maybeFail();
+    await _maybeFail('fetchBackup');
     payloadReads++;
     return backup;
   }
 
   @override
   Future<String> upload(Map<String, dynamic> payload) async {
-    await _maybeFail();
+    await _maybeFail('upload');
     uploads++;
     _stamp++;
     final updatedAt = '2026-09-21T1$_stamp:00:00.000Z';
@@ -133,8 +153,16 @@ CloudBackup _cloudBackup(
 }) =>
     CloudBackup(updatedAt: updatedAt, payload: payload);
 
-CloudSyncService _service(FakeLocalStore store, FakeCloudGateway gateway) =>
-    CloudSyncService(store: store, gateway: gateway);
+CloudSyncService _service(
+  FakeLocalStore store,
+  FakeCloudGateway gateway, {
+  DateTime Function()? clock,
+}) =>
+    CloudSyncService(
+      store: store,
+      gateway: gateway,
+      clock: clock ?? DateTime.now,
+    );
 
 void _link(
   FakeLocalStore store, {
@@ -439,23 +467,73 @@ void main() {
       expect(gateway.uploads, 0, reason: 'desfazer não mexe no backup');
     });
 
-    test('depois de desfazer, a próxima sincronização envia o que voltou',
+    test('(C2) desfazer devolve também as marcas da última sincronização',
         () async {
       final local = _snapshot(['Meus dados']);
       final store = FakeLocalStore(snapshot: local);
       final gateway = FakeCloudGateway(
-        backup: _cloudBackup(_snapshot(['Backup antigo'])),
+        backup: _cloudBackup(
+          _snapshot(['Do outro aparelho']),
+          updatedAt: '2026-09-21T08:00:00.000Z',
+        ),
+      );
+      _link(
+        store,
+        cloudUpdatedAt: '2026-09-20T09:00:00.000Z',
+        localSnapshot: _snapshot(['Antigo']),
+      );
+      final before = Map<String, String>.from(store.settings);
+      final service = _service(store, gateway);
+
+      // Antes da restauração o plano era perguntar: mudou dos dois lados.
+      final beforeOutcome = await service.synchronize(interactive: false);
+      expect(beforeOutcome.conflictReason, SyncConflictReason.bothChanged);
+
+      await service.useCloudVersion();
+      await service.undoLastRestore();
+
+      expect(snapshotHash(store.snapshot), snapshotHash(local));
+      expect(
+        store.settings[CloudSyncService.keyUserId],
+        before[CloudSyncService.keyUserId],
+      );
+      expect(
+        store.settings[CloudSyncService.keyCloudUpdatedAt],
+        before[CloudSyncService.keyCloudUpdatedAt],
+      );
+      expect(
+        store.settings[CloudSyncService.keyLocalHash],
+        before[CloudSyncService.keyLocalHash],
+      );
+    });
+
+    test('(C2) depois de desfazer, a sincronização não envia nem restaura',
+        () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Meus dados']));
+      final gateway = FakeCloudGateway(
+        backup: _cloudBackup(
+          _snapshot(['Do outro aparelho']),
+          updatedAt: '2026-09-21T08:00:00.000Z',
+        ),
+      );
+      _link(
+        store,
+        cloudUpdatedAt: '2026-09-20T09:00:00.000Z',
+        localSnapshot: _snapshot(['Antigo']),
       );
       final service = _service(store, gateway);
 
-      await service.restoreFromCloud();
+      await service.useCloudVersion();
       await service.undoLastRestore();
+      final restoresBefore = store.restores;
       final outcome = await service.synchronize(interactive: false);
 
-      expect(outcome.status, SyncStatus.uploaded);
+      expect(outcome.conflictReason, SyncConflictReason.bothChanged);
+      expect(gateway.uploads, 0, reason: 'não empurra o que foi desfeito');
+      expect(store.restores, restoresBefore, reason: 'não restaura de novo');
       expect(
         gateway.backup!.payload['transactions'],
-        local['transactions'],
+        _snapshot(['Do outro aparelho'])['transactions'],
       );
     });
 
@@ -531,6 +609,13 @@ void main() {
       expect(outcome.conflictReason, SyncConflictReason.cloudIsNewer);
       expect(gateway.uploads, 0);
       expect(store.restores, 0);
+      expect(
+        store.settings[CloudSyncService.keyPendingConflict],
+        isNull,
+        reason: 'escolha do momento, não um conflito que pausa o backup',
+      );
+      expect(
+          (await _service(store, gateway).status()).pendingConflict, isFalse);
     });
 
     test('restaurar sem backup na conta avisa o usuário', () async {
@@ -561,7 +646,8 @@ void main() {
       expect(status.errorMessage, isNull);
 
       store.settings[CloudSyncService.keyPendingConflict] = 'bothChanged';
-      store.settings[CloudSyncService.keyPreRestoreSnapshot] = '{}';
+      store.settings[CloudSyncService.keyPreRestoreAt] =
+          '2026-09-21T09:00:00.000Z';
       store.settings[CloudSyncService.keyLastError] = jsonEncode({
         'message': 'Sem conexão com a internet.',
         'at': '2026-09-21T10:00:00.000Z',
@@ -607,6 +693,325 @@ void main() {
 
       expect(info!.cloud, isNull);
       expect(info.local.transactions, 1);
+    });
+  });
+
+  group('fila de operações', () {
+    test('(C1) uma operação espera a outra terminar', () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Café']));
+      final gateway = FakeCloudGateway();
+      final service = _service(store, gateway);
+      gateway.gate = Completer<void>();
+
+      final first = service.uploadBackupNow();
+      final second = service.uploadBackupNow();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(gateway.calls.length, 1, reason: 'a segunda ainda nem começou');
+
+      gateway.gate!.complete();
+      expect((await first).status, SyncStatus.uploaded);
+      expect((await second).status, SyncStatus.alreadyInSync);
+      expect(gateway.uploads, 1, reason: 'a segunda refez o plano');
+    });
+
+    test('(C1) restauração pedida durante um envio lento entra depois dele',
+        () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Local']));
+      final gateway = FakeCloudGateway(
+        backup: _cloudBackup(_snapshot(['Da nuvem'])),
+      );
+      _link(
+        store,
+        cloudUpdatedAt: gateway.backup!.updatedAt,
+        localSnapshot: _snapshot(['Antigo']),
+      );
+      final service = _service(store, gateway);
+      gateway.gate = Completer<void>();
+
+      final background = service.synchronize(interactive: false);
+      await Future<void>.delayed(Duration.zero);
+      final restore = service.restoreFromCloud();
+      gateway.gate!.complete();
+
+      expect((await background).status, SyncStatus.uploaded);
+      expect((await restore).status, SyncStatus.restored);
+      // O estado guardado descreve os dados que ficaram no aparelho.
+      expect(
+        store.settings[CloudSyncService.keyLocalHash],
+        snapshotHash(store.snapshot),
+      );
+      expect(
+        store.settings[CloudSyncService.keyCloudUpdatedAt],
+        DateTime.parse(gateway.backup!.updatedAt).toUtc().toIso8601String(),
+      );
+      expect(
+        snapshotHash(gateway.backup!.payload),
+        snapshotHash(store.snapshot),
+      );
+    });
+
+    test('(C1) sincronização na fila refaz o plano depois da restauração',
+        () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Local']));
+      final gateway = FakeCloudGateway(
+        backup: _cloudBackup(_snapshot(['Da nuvem'])),
+      );
+      _link(
+        store,
+        cloudUpdatedAt: gateway.backup!.updatedAt,
+        localSnapshot: _snapshot(['Antigo']),
+      );
+      final service = _service(store, gateway);
+      gateway.gate = Completer<void>();
+
+      final restore = service.restoreFromCloud();
+      await Future<void>.delayed(Duration.zero);
+      final background = service.synchronize(interactive: false);
+      gateway.gate!.complete();
+
+      expect((await restore).status, SyncStatus.restored);
+      expect((await background).status, SyncStatus.alreadyInSync);
+      expect(gateway.uploads, 0, reason: 'não envia dados que já saíram daqui');
+    });
+
+    test('(C1) uma falha não trava as operações seguintes', () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Café']));
+      final gateway = FakeCloudGateway()..failure = StateError('sem permissão');
+      final service = _service(store, gateway);
+
+      expect((await service.synchronize(interactive: false)).status,
+          SyncStatus.failed);
+      gateway.failure = null;
+
+      expect((await service.uploadBackupNow()).status, SyncStatus.uploaded);
+      expect(store.settings[CloudSyncService.keyLastError], isNull);
+    });
+  });
+
+  group('troca de conta e primeira vez', () {
+    test('(I1) entrar em outra conta sem backup registra o novo vínculo',
+        () async {
+      final store = FakeLocalStore(snapshot: _snapshot([]), pristine: true);
+      store.settings[CloudSyncService.keyUserId] = _other;
+      store.settings[CloudSyncService.keyCloudUpdatedAt] =
+          '2026-09-20T09:00:00.000Z';
+      store.settings[CloudSyncService.keyLastBackupAt] =
+          '2026-09-20T09:00:00.000Z';
+      final gateway = FakeCloudGateway();
+      final service = _service(store, gateway);
+
+      final outcome = await service.synchronize(interactive: false);
+
+      expect(outcome.status, SyncStatus.nothingToSend);
+      expect(store.settings[CloudSyncService.keyUserId], _me);
+      expect(store.settings[CloudSyncService.keyCloudUpdatedAt], isNull);
+      expect(store.settings[CloudSyncService.keyLastBackupAt], isNull);
+
+      // O que for criado depois é enviado, sem conflito de conta nenhum.
+      store
+        ..pristine = false
+        ..snapshot = _snapshot(['Novo']);
+      expect((await service.synchronize(interactive: false)).status,
+          SyncStatus.uploaded);
+    });
+
+    test('(I1) conflito sabe quando a conta ainda não tem backup', () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Meus dados']));
+      store.settings[CloudSyncService.keyUserId] = _other;
+      final gateway = FakeCloudGateway();
+
+      final outcome =
+          await _service(store, gateway).synchronize(interactive: true);
+
+      expect(outcome.conflictReason, SyncConflictReason.differentAccount);
+      expect(outcome.conflict!.cloudExists, isFalse);
+      expect(outcome.conflict!.cloud, isNull);
+    });
+
+    test('(I1) sem internet não se afirma que a conta está sem backup',
+        () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Meus dados']));
+      store.settings[CloudSyncService.keyPendingConflict] = 'bothChanged';
+      final gateway = FakeCloudGateway()
+        ..failure = const SocketException('sem rota');
+
+      final info = await _service(store, gateway).pendingConflict();
+
+      expect(info!.cloudExists, isNull);
+    });
+
+    test('(I3) aparelho zerado e conta sem backup não diz que está em dia',
+        () async {
+      final store = FakeLocalStore(snapshot: _snapshot([]), pristine: true);
+
+      final outcome = await _service(store, FakeCloudGateway())
+          .synchronize(interactive: true);
+
+      expect(outcome.status, SyncStatus.nothingToSend);
+      expect(outcome.status, isNot(SyncStatus.alreadyInSync));
+    });
+
+    test('(I3) backup manual num aparelho zerado também não inventa backup',
+        () async {
+      final store = FakeLocalStore(snapshot: _snapshot([]), pristine: true);
+      final gateway = FakeCloudGateway();
+
+      final outcome = await _service(store, gateway).uploadBackupNow();
+
+      expect(outcome.status, SyncStatus.nothingToSend);
+      expect(gateway.uploads, 0);
+    });
+
+    test('data equivalente em outro formato não vira conflito', () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Café']));
+      final gateway = FakeCloudGateway()
+        ..reformat = (stamp) => DateTime.parse(stamp)
+            .toUtc()
+            .toIso8601String()
+            .replaceAll('Z', '+00:00');
+      final service = _service(store, gateway);
+
+      expect((await service.synchronize(interactive: false)).status,
+          SyncStatus.uploaded);
+      final second = await service.synchronize(interactive: false);
+
+      expect(second.status, SyncStatus.alreadyInSync);
+      expect(gateway.uploads, 1);
+      expect(store.restores, 0);
+    });
+  });
+
+  group('cópia para desfazer', () {
+    test('(I2) restauração automática não apaga a cópia do usuário', () async {
+      final original = _snapshot(['Original']);
+      final store = FakeLocalStore(snapshot: original);
+      final gateway = FakeCloudGateway(
+        backup: _cloudBackup(_snapshot(['Nuvem 1'])),
+      );
+      final service = _service(store, gateway);
+
+      await service.restoreFromCloud();
+      final firstCopyAt = (await service.status()).undoAvailableAt;
+
+      gateway.backup = _cloudBackup(
+        _snapshot(['Nuvem 2']),
+        updatedAt: '2026-09-22T08:00:00.000Z',
+      );
+      expect((await service.synchronize(interactive: false)).status,
+          SyncStatus.restored);
+      expect((await service.status()).undoAvailableAt, firstCopyAt);
+
+      expect((await service.undoLastRestore()).status, SyncStatus.restored);
+      expect(snapshotHash(store.snapshot), snapshotHash(original));
+      expect((await service.status()).canUndoRestore, isFalse);
+    });
+
+    test('(I2) a cópia guarda quando foi feita', () async {
+      final store = FakeLocalStore(snapshot: _snapshot(['Original']));
+      final gateway = FakeCloudGateway(
+        backup: _cloudBackup(_snapshot(['Nuvem'])),
+      );
+      final moment = DateTime.utc(2026, 9, 22, 10, 30);
+
+      final service = _service(store, gateway, clock: () => moment);
+      await service.restoreFromCloud();
+
+      expect((await service.status()).undoAvailableAt, moment.toLocal());
+    });
+
+    test('(I2) status não carrega o snapshot inteiro para saber se há cópia',
+        () async {
+      final store = FakeLocalStore();
+      store.settings[CloudSyncService.keyPreRestoreSnapshot] =
+          '{"snapshot":{}}';
+      store.reads.clear();
+
+      await _service(store, FakeCloudGateway()).status();
+
+      expect(
+          store.reads, isNot(contains(CloudSyncService.keyPreRestoreSnapshot)));
+    });
+  });
+
+  group('adiar a escolha', () {
+    FakeLocalStore conflicted() {
+      final store = FakeLocalStore(snapshot: _snapshot(['Meus dados']));
+      store.settings[CloudSyncService.keyPendingConflict] = 'bothChanged';
+      return store;
+    }
+
+    test('(I4) "decidir depois" silencia a pergunta automática', () async {
+      final store = conflicted();
+      final service = _service(store, FakeCloudGateway());
+
+      expect(await service.pendingConflict(), isNotNull);
+      await service.snoozeConflict();
+
+      expect(await service.pendingConflict(), isNull);
+      expect(await service.pendingConflict(ignoreSnooze: true), isNotNull);
+      expect((await service.status()).pendingConflict, isTrue);
+    });
+
+    test('(I4) a pergunta volta depois de 24 horas', () async {
+      final store = conflicted();
+      var now = DateTime.utc(2026, 9, 22, 8);
+      final service = _service(store, FakeCloudGateway(), clock: () => now);
+
+      await service.snoozeConflict();
+      now = now.add(const Duration(hours: 23));
+      expect(await service.pendingConflict(), isNull);
+
+      now = now.add(const Duration(hours: 2));
+      expect(await service.pendingConflict(), isNotNull);
+    });
+
+    test('(I4) um motivo novo volta a perguntar', () async {
+      final store = conflicted();
+      final service = _service(store, FakeCloudGateway());
+
+      await service.snoozeConflict();
+      store.settings[CloudSyncService.keyPendingConflict] = 'differentAccount';
+
+      expect(await service.pendingConflict(), isNotNull);
+    });
+
+    test('(I4) resolver o conflito limpa o adiamento', () async {
+      final store = conflicted();
+      final gateway = FakeCloudGateway();
+      final service = _service(store, gateway);
+
+      await service.snoozeConflict();
+      await service.keepThisDevice();
+
+      expect(store.settings[CloudSyncService.keyConflictSnoozed], isNull);
+      expect((await service.status()).pendingConflict, isFalse);
+    });
+  });
+
+  group('data do backup na nuvem', () {
+    test('é consultada direto na nuvem', () async {
+      final gateway = FakeCloudGateway(
+        backup: _cloudBackup(_snapshot(['A']),
+            updatedAt: '2026-09-21T08:00:00.000Z'),
+      );
+
+      final date = await _service(FakeLocalStore(), gateway).cloudBackupDate();
+
+      expect(date, DateTime.parse('2026-09-21T08:00:00.000Z'));
+    });
+
+    test('sem backup ou sem internet devolve nulo', () async {
+      expect(
+        await _service(FakeLocalStore(), FakeCloudGateway()).cloudBackupDate(),
+        isNull,
+      );
+      final offline = FakeCloudGateway()
+        ..failure = const SocketException('sem rota');
+      expect(
+        await _service(FakeLocalStore(), offline).cloudBackupDate(),
+        isNull,
+      );
     });
   });
 }

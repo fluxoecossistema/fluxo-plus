@@ -20,6 +20,9 @@ enum SyncStatus {
   /// Os dois lados já representavam a mesma informação.
   alreadyInSync,
 
+  /// Não há nada neste aparelho para enviar e a conta ainda não tem backup.
+  nothingToSend,
+
   /// Só o usuário pode decidir; nada foi alterado.
   conflict,
 
@@ -62,6 +65,7 @@ class SyncConflictInfo {
     required this.reason,
     required this.local,
     this.cloud,
+    this.cloudExists,
     this.cloudUpdatedAt,
     this.accountEmail,
   });
@@ -71,6 +75,10 @@ class SyncConflictInfo {
 
   /// Nulo quando o conteúdo do backup não pôde ser lido.
   final SnapshotCounts? cloud;
+
+  /// `true`/`false` quando dá para afirmar se a conta tem backup; `null`
+  /// quando não foi possível consultar agora.
+  final bool? cloudExists;
   final DateTime? cloudUpdatedAt;
   final String? accountEmail;
 }
@@ -92,6 +100,8 @@ class SyncOutcome {
 
   const SyncOutcome.alreadyInSync({DateTime? at})
       : this._(SyncStatus.alreadyInSync, at: at);
+
+  const SyncOutcome.nothingToSend() : this._(SyncStatus.nothingToSend);
 
   const SyncOutcome.conflict(SyncConflictReason reason,
       {SyncConflictInfo? info})
@@ -129,7 +139,7 @@ class BackupStatus {
     this.errorMessage,
     this.errorAt,
     this.pendingConflict = false,
-    this.canUndoRestore = false,
+    this.undoAvailableAt,
   });
 
   final String? accountEmail;
@@ -137,7 +147,11 @@ class BackupStatus {
   final String? errorMessage;
   final DateTime? errorAt;
   final bool pendingConflict;
-  final bool canUndoRestore;
+
+  /// Momento da cópia guardada antes da última restauração, quando existe.
+  final DateTime? undoAvailableAt;
+
+  bool get canUndoRestore => undoAvailableAt != null;
 }
 
 /// Fotografia do momento usada para decidir e executar o plano.
@@ -200,6 +214,12 @@ class CloudSyncService {
   /// Cópia dos dados locais feita imediatamente antes da última restauração.
   static const keyPreRestoreSnapshot = 'pre_restore_snapshot';
 
+  /// Momento dessa cópia. Serve de indicador barato de que ela existe.
+  static const keyPreRestoreAt = 'pre_restore_at';
+
+  /// Quando o usuário pediu para decidir o conflito depois.
+  static const keyConflictSnoozed = 'sync_conflict_snoozed_at';
+
   static const confirmationRedirect =
       'https://github.com/fluxoecossistema/fluxo-plus';
 
@@ -209,13 +229,17 @@ class CloudSyncService {
   final SyncPlanner _planner;
   final DateTime Function() _clock;
 
+  /// Quanto tempo a pergunta automática fica quieta depois de "decidir depois".
+  static const _snoozeDuration = Duration(hours: 24);
+
+  /// Fila das operações de backup: uma de cada vez, na ordem em que chegaram.
+  Future<void> _queue = Future<void>.value();
+
   bool get isConfigured => _gateway != null;
 
   bool get isSignedIn => _gateway?.currentUserId != null;
 
   String? get accountEmail => _gateway?.currentUserEmail;
-
-  Stream<AuthState>? get authChanges => _client?.auth.onAuthStateChange;
 
   String? get displayName {
     final metadata = _client?.auth.currentUser?.userMetadata;
@@ -312,11 +336,15 @@ class CloudSyncService {
   ///
   /// Com [interactive] falso (abertura, retomada e ida para segundo plano)
   /// nada é perguntado ao usuário: um conflito apenas fica marcado.
+  ///
+  /// [timeout] limita apenas a espera de quem chamou; a operação continua na
+  /// fila até terminar, para não deixar nuvem e aparelho em estados
+  /// diferentes.
   Future<SyncOutcome> synchronize({
     required bool interactive,
     Duration? timeout,
   }) =>
-      _guarded(
+      _enqueue(
         () => _synchronize(interactive: interactive),
         timeout: timeout,
       );
@@ -325,75 +353,76 @@ class CloudSyncService {
   ///
   /// Se o backup da nuvem estiver à frente deste aparelho, a escolha volta
   /// para o usuário em vez de apagar o que está lá.
-  Future<SyncOutcome> uploadBackupNow() => _guarded(() async {
-        final situation = await _situation();
-        switch (situation.plan.action) {
-          case SyncAction.uploadLocal:
-            return _upload(situation.local);
-          case SyncAction.nothing:
-            if (situation.cloudUpdatedAt == null) {
-              return _upload(situation.local);
-            }
-            await _recordSuccess(
-              cloudUpdatedAt: situation.cloudUpdatedAt!,
-              localHash: situation.localHash,
-            );
-            return SyncOutcome.alreadyInSync(
-              at: DateTime.tryParse(situation.cloudUpdatedAt!),
-            );
-          case SyncAction.restoreCloud:
-            return _conflict(
-              SyncConflictReason.cloudIsNewer,
-              interactive: true,
-            );
-          case SyncAction.conflict:
-            return _conflict(situation.plan.reason!, interactive: true);
-        }
-      });
+  Future<SyncOutcome> uploadBackupNow() => _enqueue(_uploadBackupNow);
 
   /// Substitui os dados deste aparelho pelo backup, guardando antes uma cópia
   /// para o "Desfazer".
-  Future<SyncOutcome> restoreFromCloud() => _guarded(_restore);
+  Future<SyncOutcome> restoreFromCloud() =>
+      _enqueue(() => _restore(interactive: true));
 
   /// Resolve o conflito mantendo o que está neste aparelho.
   Future<SyncOutcome> keepThisDevice() =>
-      _guarded(() async => _upload(await _store.exportSnapshot()));
+      _enqueue(() async => _upload(await _store.exportSnapshot()));
 
   /// Resolve o conflito trazendo o backup da nuvem.
   Future<SyncOutcome> useCloudVersion() => restoreFromCloud();
 
   /// Devolve os dados que existiam antes da última restauração.
-  Future<SyncOutcome> undoLastRestore() async {
-    try {
-      final stored = await _store.readSetting(keyPreRestoreSnapshot);
-      if (stored == null) {
-        return const SyncOutcome.failed(
-          'Não há restauração recente para desfazer.',
-        );
-      }
-      await _store.restoreSnapshot(
-        Map<String, dynamic>.from(jsonDecode(stored) as Map),
-      );
-      await _store.removeSetting(keyPreRestoreSnapshot);
-      // A marca da última sincronização continua como estava de propósito:
-      // assim o próximo backup reconhece que estes dados mudaram e os envia.
-      return SyncOutcome.restored(_clock());
-    } catch (_) {
-      return _failWith('Não foi possível desfazer a restauração.');
-    }
-  }
+  Future<SyncOutcome> undoLastRestore() =>
+      _enqueue(_undoLastRestore, requiresAccount: false);
 
   /// Conflito à espera de uma escolha do usuário, se houver.
-  Future<SyncConflictInfo?> pendingConflict() async {
+  Future<SyncConflictInfo?> pendingConflict({bool ignoreSnooze = false}) async {
     if (!isSignedIn) return null;
     final stored = await _store.readSetting(keyPendingConflict);
     if (stored == null) return null;
-    return _describeConflict(
-      SyncConflictReason.values.firstWhere(
-        (reason) => reason.name == stored,
-        orElse: () => SyncConflictReason.bothChanged,
-      ),
+    final reason = SyncConflictReason.values.firstWhere(
+      (value) => value.name == stored,
+      orElse: () => SyncConflictReason.bothChanged,
     );
+    if (!ignoreSnooze && await _isSnoozed(reason)) return null;
+    return _describeConflict(reason);
+  }
+
+  /// O usuário pediu para decidir depois e o motivo continua o mesmo.
+  Future<bool> _isSnoozed(SyncConflictReason reason) async {
+    final raw = await _store.readSetting(keyConflictSnoozed);
+    if (raw == null) return false;
+    try {
+      final data = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+      if (data['reason'] != reason.name) return false;
+      final at = DateTime.tryParse(data['at'] as String? ?? '');
+      if (at == null) return false;
+      return _clock().toUtc().difference(at.toUtc()) < _snoozeDuration;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Guarda que o usuário preferiu decidir depois: a pergunta automática fica
+  /// quieta por [_snoozeDuration], mas o aviso continua em Configurações e o
+  /// botão "Resolver" continua funcionando.
+  Future<void> snoozeConflict() async {
+    final reason = await _store.readSetting(keyPendingConflict);
+    if (reason == null) return;
+    await _store.writeSetting(
+      keyConflictSnoozed,
+      jsonEncode({
+        'reason': reason,
+        'at': _clock().toUtc().toIso8601String(),
+      }),
+    );
+  }
+
+  /// Quando o backup da conta foi gravado, consultado agora na nuvem.
+  /// Nulo quando a conta não tem backup ou quando não deu para consultar.
+  Future<DateTime?> cloudBackupDate() async {
+    try {
+      final stamp = _normalize(await _gateway?.fetchUpdatedAt());
+      return stamp == null ? null : DateTime.tryParse(stamp);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Situação atual do backup para a tela de configurações.
@@ -416,7 +445,38 @@ class CloudSyncService {
       errorMessage: error?['message'] as String?,
       errorAt: DateTime.tryParse(error?['at'] as String? ?? '')?.toLocal(),
       pendingConflict: await _store.readSetting(keyPendingConflict) != null,
-      canUndoRestore: await _store.readSetting(keyPreRestoreSnapshot) != null,
+      undoAvailableAt:
+          DateTime.tryParse(await _store.readSetting(keyPreRestoreAt) ?? '')
+              ?.toLocal(),
+    );
+  }
+
+  /// Enfileira [action]: as operações de backup nunca correm em paralelo, para
+  /// uma não gravar por cima da decisão da outra. Cada uma só olha o estado
+  /// quando chega a sua vez.
+  Future<SyncOutcome> _enqueue(
+    Future<SyncOutcome> Function() action, {
+    bool requiresAccount = true,
+    Duration? timeout,
+  }) {
+    final completer = Completer<SyncOutcome>();
+    _queue = _queue.then((_) async {
+      SyncOutcome result;
+      try {
+        result = await _guarded(action, requiresAccount: requiresAccount);
+      } catch (_) {
+        // Uma falha nunca pode quebrar a fila das operações seguintes.
+        result = const SyncOutcome.failed(
+          'Não foi possível concluir o backup agora.',
+        );
+      }
+      if (!completer.isCompleted) completer.complete(result);
+    });
+    final queued = completer.future;
+    if (timeout == null) return queued;
+    return queued.timeout(
+      timeout,
+      onTimeout: () => _recordFailure(TimeoutException('backup')),
     );
   }
 
@@ -424,18 +484,19 @@ class CloudSyncService {
   /// internet o aplicativo continua funcionando normalmente.
   Future<SyncOutcome> _guarded(
     Future<SyncOutcome> Function() action, {
-    Duration? timeout,
+    bool requiresAccount = true,
   }) async {
-    final gateway = _gateway;
-    if (gateway == null) {
-      return const SyncOutcome.skipped(SyncSkipReason.notConfigured);
-    }
-    if (gateway.currentUserId == null) {
-      return const SyncOutcome.skipped(SyncSkipReason.notSignedIn);
+    if (requiresAccount) {
+      final gateway = _gateway;
+      if (gateway == null) {
+        return const SyncOutcome.skipped(SyncSkipReason.notConfigured);
+      }
+      if (gateway.currentUserId == null) {
+        return const SyncOutcome.skipped(SyncSkipReason.notSignedIn);
+      }
     }
     try {
-      final running = action();
-      return await (timeout == null ? running : running.timeout(timeout));
+      return await action();
     } catch (error) {
       return _recordFailure(error);
     }
@@ -445,22 +506,50 @@ class CloudSyncService {
     final situation = await _situation();
     switch (situation.plan.action) {
       case SyncAction.nothing:
-        if (situation.cloudUpdatedAt != null) {
-          await _recordSuccess(
-            cloudUpdatedAt: situation.cloudUpdatedAt!,
-            localHash: situation.localHash,
-          );
-        }
-        return SyncOutcome.alreadyInSync(
-          at: DateTime.tryParse(situation.cloudUpdatedAt ?? ''),
-        );
+        return _recordNothing(situation);
       case SyncAction.uploadLocal:
         return _upload(situation.local);
       case SyncAction.restoreCloud:
-        return _restore(backup: situation.backup);
+        return _restore(backup: situation.backup, interactive: interactive);
       case SyncAction.conflict:
         return _conflict(situation.plan.reason!, interactive: interactive);
     }
+  }
+
+  Future<SyncOutcome> _uploadBackupNow() async {
+    final situation = await _situation();
+    switch (situation.plan.action) {
+      case SyncAction.uploadLocal:
+        return _upload(situation.local);
+      case SyncAction.nothing:
+        return _recordNothing(situation);
+      case SyncAction.restoreCloud:
+        // A escolha volta para o usuário agora, mas isso não é um conflito
+        // guardado: o backup automático continua liberado.
+        return _conflict(
+          SyncConflictReason.cloudIsNewer,
+          interactive: true,
+          persist: false,
+        );
+      case SyncAction.conflict:
+        return _conflict(situation.plan.reason!, interactive: true);
+    }
+  }
+
+  /// Nada a fazer: ainda assim vale registrar a que conta este aparelho está
+  /// ligado, para uma troca de conta não virar conflito falso depois.
+  Future<SyncOutcome> _recordNothing(_Situation situation) async {
+    if (situation.cloudUpdatedAt != null) {
+      await _recordSuccess(
+        cloudUpdatedAt: situation.cloudUpdatedAt!,
+        localHash: situation.localHash,
+      );
+      return SyncOutcome.alreadyInSync(
+        at: DateTime.tryParse(situation.cloudUpdatedAt!),
+      );
+    }
+    await _linkWithoutBackup(situation.localHash);
+    return const SyncOutcome.nothingToSend();
   }
 
   Future<_Situation> _situation() async {
@@ -509,16 +598,15 @@ class CloudSyncService {
     return SyncOutcome.uploaded(DateTime.tryParse(stamp) ?? _clock());
   }
 
-  Future<SyncOutcome> _restore({CloudBackup? backup}) async {
+  Future<SyncOutcome> _restore({
+    CloudBackup? backup,
+    required bool interactive,
+  }) async {
     final cloud = backup ?? await _gateway!.fetchBackup();
     if (cloud == null) {
       return _failWith('Ainda não há backup nesta conta.');
     }
-    // A cópia de segurança é gravada antes de qualquer alteração.
-    await _store.writeSetting(
-      keyPreRestoreSnapshot,
-      jsonEncode(await _store.exportSnapshot()),
-    );
+    await _saveUndoCopy(interactive: interactive);
     await _store.restoreSnapshot(cloud.payload);
     final stamp = _normalize(cloud.updatedAt)!;
     await _recordSuccess(
@@ -528,11 +616,74 @@ class CloudSyncService {
     return SyncOutcome.restored(DateTime.tryParse(stamp) ?? _clock());
   }
 
+  /// Guarda os dados atuais e as marcas da sincronização antes de substituir
+  /// tudo. Uma restauração automática nunca apaga a cópia que o usuário ainda
+  /// pode querer de volta: vale sempre a mais antiga.
+  Future<void> _saveUndoCopy({required bool interactive}) async {
+    if (!interactive && await _store.readSetting(keyPreRestoreAt) != null) {
+      return;
+    }
+    final at = _clock().toUtc().toIso8601String();
+    await _store.writeSetting(
+      keyPreRestoreSnapshot,
+      jsonEncode({
+        'at': at,
+        'snapshot': await _store.exportSnapshot(),
+        'state': {
+          'userId': await _store.readSetting(keyUserId),
+          'cloudUpdatedAt': await _store.readSetting(keyCloudUpdatedAt),
+          'localHash': await _store.readSetting(keyLocalHash),
+          'lastBackupAt': await _store.readSetting(keyLastBackupAt),
+        },
+      }),
+    );
+    await _store.writeSetting(keyPreRestoreAt, at);
+  }
+
+  Future<SyncOutcome> _undoLastRestore() async {
+    final stored = await _store.readSetting(keyPreRestoreSnapshot);
+    if (stored == null) {
+      return const SyncOutcome.failed(
+        'Não há restauração recente para desfazer.',
+      );
+    }
+    try {
+      final decoded = Map<String, dynamic>.from(jsonDecode(stored) as Map);
+      // Formato antigo: o valor guardado era só o snapshot.
+      final snapshot = decoded['snapshot'] is Map
+          ? Map<String, dynamic>.from(decoded['snapshot'] as Map)
+          : decoded;
+      final state = decoded['state'] is Map
+          ? Map<String, dynamic>.from(decoded['state'] as Map)
+          : const <String, dynamic>{};
+      await _store.restoreSnapshot(snapshot);
+      // As marcas voltam ao que eram antes da restauração: a próxima decisão é
+      // a mesma de antes, e não o contrário dela.
+      await _rewindSetting(keyUserId, state['userId'] as String?);
+      await _rewindSetting(
+        keyCloudUpdatedAt,
+        state['cloudUpdatedAt'] as String?,
+      );
+      await _rewindSetting(keyLocalHash, state['localHash'] as String?);
+      await _rewindSetting(keyLastBackupAt, state['lastBackupAt'] as String?);
+      await _store.removeSetting(keyPreRestoreSnapshot);
+      await _store.removeSetting(keyPreRestoreAt);
+      return SyncOutcome.restored(_clock());
+    } catch (_) {
+      return _failWith('Não foi possível desfazer a restauração.');
+    }
+  }
+
+  Future<void> _rewindSetting(String key, String? value) => value == null
+      ? _store.removeSetting(key)
+      : _store.writeSetting(key, value);
+
   Future<SyncOutcome> _conflict(
     SyncConflictReason reason, {
     required bool interactive,
+    bool persist = true,
   }) async {
-    await _store.writeSetting(keyPendingConflict, reason.name);
+    if (persist) await _store.writeSetting(keyPendingConflict, reason.name);
     if (!interactive) return SyncOutcome.conflict(reason);
     return SyncOutcome.conflict(
       reason,
@@ -545,16 +696,21 @@ class CloudSyncService {
   ) async {
     final local = SnapshotCounts.fromSnapshot(await _store.exportSnapshot());
     CloudBackup? cloud;
+    bool? exists;
     try {
       cloud = await _gateway?.fetchBackup();
+      exists = cloud != null;
     } catch (_) {
-      // Sem internet dá para mostrar pelo menos o lado deste aparelho.
+      // Sem internet dá para mostrar pelo menos o lado deste aparelho, sem
+      // afirmar que a conta está sem backup.
       cloud = null;
+      exists = null;
     }
     return SyncConflictInfo(
       reason: reason,
       local: local,
       cloud: cloud == null ? null : SnapshotCounts.fromSnapshot(cloud.payload),
+      cloudExists: exists,
       cloudUpdatedAt: cloud == null
           ? null
           : DateTime.tryParse(_normalize(cloud.updatedAt) ?? ''),
@@ -572,6 +728,18 @@ class CloudSyncService {
     await _store.writeSetting(keyLastBackupAt, cloudUpdatedAt);
     await _store.removeSetting(keyLastError);
     await _store.removeSetting(keyPendingConflict);
+    await _store.removeSetting(keyConflictSnoozed);
+  }
+
+  /// A conta ainda não tem backup: guarda só o vínculo e o estado local.
+  Future<void> _linkWithoutBackup(String localHash) async {
+    await _store.writeSetting(keyUserId, _gateway!.currentUserId!);
+    await _store.writeSetting(keyLocalHash, localHash);
+    await _store.removeSetting(keyCloudUpdatedAt);
+    await _store.removeSetting(keyLastBackupAt);
+    await _store.removeSetting(keyLastError);
+    await _store.removeSetting(keyPendingConflict);
+    await _store.removeSetting(keyConflictSnoozed);
   }
 
   Future<SyncOutcome> _failWith(String message) async {
